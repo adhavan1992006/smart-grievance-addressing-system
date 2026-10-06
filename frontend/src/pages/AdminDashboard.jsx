@@ -123,7 +123,7 @@ function AdminDashboard() {
       setDepartmentLoading(true);
 
       const res = await axios.get(
-        "http://localhost:5000/api/admin/departments"
+        "https://smart-grievance-backend-b6ow.onrender.com/api/admin/departments"
       );
 
       if (res.data.success) {
@@ -163,7 +163,7 @@ function AdminDashboard() {
       setOtpSending(true);
 
       const res = await axios.post(
-        "http://localhost:5000/api/admin/send-officer-otp",
+        "https://smart-grievance-backend-b6ow.onrender.com/api/admin/send-officer-otp",
         {
           email: formData.email,
           full_name: formData.full_name,
@@ -217,7 +217,7 @@ function AdminDashboard() {
       setOtpVerifying(true);
 
       const res = await axios.post(
-        "http://localhost:5000/api/admin/verify-officer-otp",
+        "https://smart-grievance-backend-b6ow.onrender.com/api/admin/verify-officer-otp",
         {
           email: formData.email,
           otp: otpCode,
@@ -260,7 +260,7 @@ function AdminDashboard() {
       setLoading(true);
 
       const res = await axios.get(
-        "http://localhost:5000/api/admin/officers"
+        "https://smart-grievance-backend-b6ow.onrender.com/api/admin/officers"
       );
 
       if (res.data.success) {
@@ -287,7 +287,7 @@ function AdminDashboard() {
       setPetitionLoading(true);
 
       const res = await axios.get(
-        "http://localhost:5000/api/admin/petitions"
+        "https://smart-grievance-backend-b6ow.onrender.com/api/admin/petitions"
       );
 
       if (res.data.success) {
@@ -417,7 +417,7 @@ function AdminDashboard() {
       setLoading(true);
 
       const res = await axios.post(
-        "http://localhost:5000/api/admin/add-officer",
+        "https://smart-grievance-backend-b6ow.onrender.com/api/admin/add-officer",
         {
           full_name: formData.full_name.trim(),
           email: formData.email.trim().toLowerCase(),
@@ -539,7 +539,7 @@ function AdminDashboard() {
       setLoading(true);
 
       const res = await axios.put(
-        `http://localhost:5000/api/admin/officer/${editingOfficer.id}`,
+        `https://smart-grievance-backend-b6ow.onrender.com/api/admin/officer/${editingOfficer.id}`,
         {
           full_name: formData.full_name.trim(),
           email: formData.email.trim().toLowerCase(),
@@ -600,7 +600,7 @@ function AdminDashboard() {
       setLoading(true);
 
       const res = await axios.delete(
-        `http://localhost:5000/api/admin/officer/${officerToDelete.id}`
+        `https://smart-grievance-backend-b6ow.onrender.com/api/admin/officer/${officerToDelete.id}`
       );
 
       if (res.data.success) {

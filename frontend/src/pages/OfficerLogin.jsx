@@ -33,7 +33,7 @@ function OfficerLogin() {
       setLoading(true);
 
       const response = await axios.post(
-        "http://localhost:5000/api/officer/login",
+        "https://smart-grievance-backend-b6ow.onrender.com/api/officer/login",
         {
           email: formData.email.trim().toLowerCase(),
           password: formData.password,

@@ -25,17 +25,17 @@ function OfficerPetitions() {
         let url;
 
         if (filter === "escalated") {
-          url = "http://localhost:5000/api/officer/petitions-escalated";
+          url = "https://smart-grievance-backend-b6ow.onrender.com/api/officer/petitions-escalated";
         } else if (category) {
-          url = `http://localhost:5000/api/officer/petitions/${encodeURIComponent(
+          url = `https://smart-grievance-backend-b6ow.onrender.com/api/officer/petitions/${encodeURIComponent(
             category
           )}`;
         } else if (area) {
-          url = `http://localhost:5000/api/officer/petitions/area/${encodeURIComponent(
+          url = `https://smart-grievance-backend-b6ow.onrender.com/api/officer/petitions/area/${encodeURIComponent(
             area
           )}`;
         } else {
-          url = "http://localhost:5000/api/officer/petitions";
+          url = "https://smart-grievance-backend-b6ow.onrender.com/api/officer/petitions";
         }
 
         const response = await axios.get(url);

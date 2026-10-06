@@ -14,7 +14,7 @@ function OfficerProblemPriority() {
   useEffect(() => {
     const fetchPriorities = async () => {
       try {
-        const response = await axios.get("http://localhost:5000/api/officer/priority");
+        const response = await axios.get("https://smart-grievance-backend-b6ow.onrender.com/api/officer/priority");
 
         if (response.data.success) {
           setPriorities(response.data.priorities || []);

@@ -24,7 +24,7 @@ function OfficerAreaPriority() {
     const fetchAreaPriority = async () => {
       try {
         const response = await axios.get(
-          "http://localhost:5000/api/officer/area-priority"
+          "https://smart-grievance-backend-b6ow.onrender.com/api/officer/area-priority"
         );
 
         if (response.data.success) {

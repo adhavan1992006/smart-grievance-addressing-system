@@ -19,7 +19,7 @@ function CitizenFeedback({ petitionId, citizenId }) {
   const fetchFeedback = async () => {
     try {
       const response = await axios.get(
-        `http://localhost:5000/api/feedback/${petitionId}`
+        `https://smart-grievance-backend-b6ow.onrender.com/api/feedback/${petitionId}`
       );
       if (response.data.success && response.data.feedback) {
         setExistingFeedback(response.data.feedback);
@@ -38,7 +38,7 @@ function CitizenFeedback({ petitionId, citizenId }) {
     setSubmitting(true);
 
     try {
-      const response = await axios.post("http://localhost:5000/api/feedback", {
+      const response = await axios.post("https://smart-grievance-backend-b6ow.onrender.com/api/feedback", {
         petition_id: petitionId,
         citizen_id: citizenId,
         rating,

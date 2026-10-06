@@ -227,7 +227,7 @@ function SubmitPetition() {
       }
 
       const res = await axios.post(
-        "http://localhost:5000/api/petition/submit",
+        "https://smart-grievance-backend-b6ow.onrender.com/api/petition/submit",
         data,
         {
           headers: {

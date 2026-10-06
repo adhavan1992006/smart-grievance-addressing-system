@@ -106,7 +106,7 @@ function CitizenRegister() {
             }
 
             try {
-                const res = await axios.post("http://localhost:5000/api/auth/check-duplicate", { email: cleanEmail });
+                const res = await axios.post("https://smart-grievance-backend-b6ow.onrender.com/api/auth/check-duplicate", { email: cleanEmail });
                 if (!res.data.success && res.data.duplicate === "email") {
                     setFieldErrors(prev => ({ ...prev, email: res.data.message }));
                 } else {
@@ -120,7 +120,7 @@ function CitizenRegister() {
         if (field === "phone") {
             if (value.length === 10) {
                 try {
-                    const res = await axios.post("http://localhost:5000/api/auth/check-duplicate", { phone: value });
+                    const res = await axios.post("https://smart-grievance-backend-b6ow.onrender.com/api/auth/check-duplicate", { phone: value });
                     if (!res.data.success && res.data.duplicate === "phone") {
                         setFieldErrors(prev => ({ ...prev, phone: res.data.message }));
                     } else {
@@ -153,7 +153,7 @@ function CitizenRegister() {
             setOtpLoading(true);
 
             const response = await axios.post(
-                "http://localhost:5000/api/auth/send-email-otp",
+                "https://smart-grievance-backend-b6ow.onrender.com/api/auth/send-email-otp",
                 { email: cleanEmail }
             );
 
@@ -206,7 +206,7 @@ function CitizenRegister() {
             setOtpLoading(true);
 
             const response = await axios.post(
-                "http://localhost:5000/api/auth/verify-email-otp",
+                "https://smart-grievance-backend-b6ow.onrender.com/api/auth/verify-email-otp",
                 {
                     email: formData.email.trim().toLowerCase(),
                     otp: otp.trim()
@@ -271,7 +271,7 @@ function CitizenRegister() {
             setLoading(true);
 
             const response = await axios.post(
-                "http://localhost:5000/api/auth/register",
+                "https://smart-grievance-backend-b6ow.onrender.com/api/auth/register",
                 {
                     full_name: formData.full_name.trim(),
                     email: formData.email.trim().toLowerCase(),

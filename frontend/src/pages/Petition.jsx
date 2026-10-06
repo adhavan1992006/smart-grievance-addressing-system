@@ -70,7 +70,7 @@ function Petition() {
       setAssigning(true);
       setAssignAlert(null);
       const res = await axios.put(
-        `http://localhost:5000/api/officer/petition/${id}/assign`,
+        `https://smart-grievance-backend-b6ow.onrender.com/api/officer/petition/${id}/assign`,
         {
           assigned_department: assignDept,
         }
@@ -116,7 +116,7 @@ function Petition() {
     const fetchPetition = async () => {
       try {
         const response = await axios.get(
-          `http://localhost:5000/api/officer/petition/${id}`
+          `https://smart-grievance-backend-b6ow.onrender.com/api/officer/petition/${id}`
         );
 
         if (response.data.success) {
@@ -146,7 +146,7 @@ function Petition() {
       setInlineAlert(null);
 
       const response = await axios.put(
-        `http://localhost:5000/api/officer/petition/${id}/status`,
+        `https://smart-grievance-backend-b6ow.onrender.com/api/officer/petition/${id}/status`,
         { status: newStatus }
       );
 
@@ -361,7 +361,7 @@ function Petition() {
                           onClick={() => setShowImage(true)}
                         >
                           <img
-                            src={`http://localhost:5000${petition.image_path}`}
+                            src={`https://smart-grievance-backend-b6ow.onrender.com${petition.image_path}`}
                             alt="Grievance Attachment"
                             className="img-fluid rounded"
                             style={{ maxHeight: "260px", objectFit: "contain" }}
@@ -571,7 +571,7 @@ function Petition() {
               </button>
 
               <img
-                src={`http://localhost:5000${petition.image_path}`}
+                src={`https://smart-grievance-backend-b6ow.onrender.com${petition.image_path}`}
                 alt="Grievance Full Preview"
                 onClick={(e) => e.stopPropagation()}
                 style={{

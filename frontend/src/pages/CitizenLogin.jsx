@@ -40,7 +40,7 @@ function CitizenLogin() {
             setLoading(true);
 
             const res = await axios.post(
-                "http://localhost:5000/api/auth/login",
+                "https://smart-grievance-backend-b6ow.onrender.com/api/auth/login",
                 {
                     email: loginData.email.trim().toLowerCase(),
                     password: loginData.password

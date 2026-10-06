@@ -19,7 +19,7 @@ function TrackPetition() {
     }
 
     axios
-      .get(`http://localhost:5000/api/petition/my-petitions/${user.id}`)
+      .get(`https://smart-grievance-backend-b6ow.onrender.com/api/petition/my-petitions/${user.id}`)
       .then((response) => {
         if (response.data.success) {
           setPetitions(response.data.petitions || []);

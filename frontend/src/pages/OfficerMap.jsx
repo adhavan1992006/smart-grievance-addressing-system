@@ -121,7 +121,7 @@ function OfficerMap() {
   useEffect(() => {
     const fetchMapPetitions = async () => {
       try {
-        const response = await axios.get("http://localhost:5000/api/officer/map");
+        const response = await axios.get("https://smart-grievance-backend-b6ow.onrender.com/api/officer/map");
 
         if (response.data.success) {
           const validPetitions = response.data.petitions.filter((petition) => {
