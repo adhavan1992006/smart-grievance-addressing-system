@@ -1,0 +1,3267 @@
+const express = require("express");
+const bcrypt = require("bcrypt");
+const jwt = require("jsonwebtoken");
+const db = require("../db");
+
+const {
+    sendPetitionUnderReviewEmail,
+    sendPetitionInProgressEmail,
+    sendPetitionResolvedEmail,
+    sendPetitionAssignedEmail
+} = require("../services/emailService");
+
+const { authenticateToken } = require("../middleware/auth");
+
+const router = express.Router();
+
+/* =====================================================
+   HELPER FUNCTIONS
+===================================================== */
+
+/*
+ * MUNICIPAL OFFICER
+ *
+ * IMPORTANT:
+ * Your database currently has:
+ *
+ * sub_role = municipal
+ * officer_type = department
+ *
+ * Therefore we check BOTH fields.
+ */
+function isMunicipalOfficer(req) {
+
+    return (
+        req.user &&
+        (
+            (
+                req.user.role === "officer" &&
+                (
+                    req.user.officer_type === "municipal" ||
+                    req.user.sub_role === "municipal"
+                )
+            ) ||
+            req.user.role === "admin"
+        )
+    );
+}
+
+
+/*
+ * DEPARTMENT OFFICER
+ *
+ * Municipal officers must NOT be treated
+ * as department officers.
+ */
+function isDepartmentOfficer(req) {
+
+    return (
+        req.user &&
+        req.user.role === "officer" &&
+        req.user.officer_type === "department" &&
+        req.user.sub_role !== "municipal"
+    );
+}
+
+
+/* =====================================================
+   OFFICER LOGIN
+===================================================== */
+
+router.post("/login", (req, res) => {
+
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+
+        return res.status(400).json({
+            success: false,
+            message: "Email and password are required"
+        });
+    }
+
+    const cleanEmail = String(email).trim().toLowerCase();
+
+    const query = `
+        SELECT
+            id,
+            full_name,
+            email,
+            password,
+            department,
+            officer_type,
+            sub_role,
+            is_active
+        FROM officers
+        WHERE LOWER(email) = ?
+    `;
+
+    db.query(query, [cleanEmail], async (err, result) => {
+
+        if (err) {
+
+            console.error(
+                "Officer login database error:",
+                err
+            );
+
+            return res.status(500).json({
+                success: false,
+                message: "Database error during login"
+            });
+        }
+
+
+        if (!result || result.length === 0) {
+
+            return res.status(401).json({
+                success: false,
+                message: "Invalid Email"
+            });
+        }
+
+
+        const officer = result[0];
+
+
+        /* -------------------------------------------------
+           CHECK ACTIVE STATUS
+        ------------------------------------------------- */
+
+        if (
+            officer.is_active !== undefined &&
+            officer.is_active !== null &&
+            Number(officer.is_active) !== 1
+        ) {
+
+            return res.status(403).json({
+                success: false,
+                message: "Officer account is inactive"
+            });
+        }
+
+
+        try {
+
+            const valid = await bcrypt.compare(
+                password,
+                officer.password
+            );
+
+
+            if (!valid) {
+
+                return res.status(401).json({
+                    success: false,
+                    message: "Invalid Password"
+                });
+            }
+
+
+            /*
+             * =================================================
+             * IMPORTANT FIX
+             * =================================================
+             *
+             * If sub_role is municipal,
+             * ALWAYS treat the officer as municipal.
+             *
+             * This fixes your current database:
+             *
+             * officer_type = department
+             * sub_role = municipal
+             */
+            let officerType;
+
+
+            if (
+                officer.sub_role &&
+                officer.sub_role.toLowerCase() === "municipal"
+            ) {
+
+                officerType = "municipal";
+
+            }
+
+            else if (
+                officer.officer_type &&
+                officer.officer_type.toLowerCase() === "municipal"
+            ) {
+
+                officerType = "municipal";
+
+            }
+
+            else {
+
+                officerType = "department";
+            }
+
+
+            /*
+             * Normalize sub_role
+             */
+            const subRole =
+                officer.sub_role ||
+                officerType;
+
+
+            /* -------------------------------------------------
+               CREATE JWT
+            ------------------------------------------------- */
+
+            const token = jwt.sign(
+
+                {
+                    id: officer.id,
+
+                    email: officer.email,
+
+                    role: "officer",
+
+                    officer_type: officerType,
+
+                    sub_role: subRole,
+
+                    department:
+                        officer.department || null
+                },
+
+                process.env.JWT_SECRET,
+
+                {
+                    expiresIn: "24h"
+                }
+            );
+
+
+            /* -------------------------------------------------
+               LOGIN RESPONSE
+            ------------------------------------------------- */
+
+            return res.json({
+
+                success: true,
+
+                message: "Officer Login Successful",
+
+                token,
+
+                officer: {
+
+                    id: officer.id,
+
+                    full_name: officer.full_name,
+
+                    email: officer.email,
+
+                    department:
+                        officer.department,
+
+                    officer_type:
+                        officerType,
+
+                    sub_role:
+                        subRole
+                }
+            });
+
+        }
+
+        catch (error) {
+
+            console.error(
+                "Officer password verification error:",
+                error
+            );
+
+            return res.status(500).json({
+                success: false,
+                message: "Login failed"
+            });
+        }
+    });
+});
+
+
+/* =====================================================
+   ALL BELOW ROUTES REQUIRE LOGIN
+===================================================== */
+
+router.use(authenticateToken);
+
+
+/* =====================================================
+   GET LOGGED-IN OFFICER PROFILE
+===================================================== */
+
+router.get("/profile", (req, res) => {
+
+    if (req.user.role !== "officer") {
+
+        return res.status(403).json({
+            success: false,
+            message: "Officer access required"
+        });
+    }
+
+
+    const query = `
+        SELECT
+            id,
+            full_name,
+            email,
+            department,
+            officer_type,
+            sub_role,
+            is_active
+        FROM officers
+        WHERE id = ?
+    `;
+
+
+    db.query(
+        query,
+        [req.user.id],
+        (err, result) => {
+
+            if (err) {
+
+                console.error(
+                    "Officer profile error:",
+                    err
+                );
+
+                return res.status(500).json({
+                    success: false,
+                    message:
+                        "Failed to load officer profile"
+                });
+            }
+
+
+            if (!result || result.length === 0) {
+
+                return res.status(404).json({
+                    success: false,
+                    message: "Officer not found"
+                });
+            }
+
+
+            const officer = result[0];
+
+
+            /*
+             * Normalize officer type here also.
+             */
+            let officerType;
+
+
+            if (
+                officer.sub_role &&
+                officer.sub_role.toLowerCase() === "municipal"
+            ) {
+
+                officerType = "municipal";
+
+            }
+
+            else if (
+                officer.officer_type &&
+                officer.officer_type.toLowerCase() === "municipal"
+            ) {
+
+                officerType = "municipal";
+
+            }
+
+            else {
+
+                officerType = "department";
+            }
+
+
+            res.json({
+
+                success: true,
+
+                officer: {
+
+                    ...officer,
+
+                    officer_type:
+                        officerType
+                }
+            });
+        }
+    );
+});
+
+
+/* =====================================================
+   MUNICIPAL OFFICER ONLY
+   SLA STATISTICS
+===================================================== */
+
+router.get("/sla-stats", (req, res) => {
+
+    if (!isMunicipalOfficer(req)) {
+
+        return res.status(403).json({
+            success: false,
+            message:
+                "SLA statistics are available only to municipal officers"
+        });
+    }
+
+
+    const query = `
+        SELECT
+
+            COUNT(
+                CASE
+                    WHEN
+                        (
+                            status NOT IN
+                            ('Resolved', 'Rejected')
+                            OR status IS NULL
+                        )
+                        AND sla_deadline IS NOT NULL
+                        AND NOW() > sla_deadline
+                    THEN 1
+                END
+            ) AS overdue,
+
+
+            COUNT(
+                CASE
+                    WHEN
+                        (
+                            status NOT IN
+                            ('Resolved', 'Rejected')
+                            OR status IS NULL
+                        )
+                        AND sla_deadline IS NOT NULL
+                        AND sla_deadline
+                        BETWEEN NOW()
+                        AND DATE_ADD(NOW(), INTERVAL 24 HOUR)
+                    THEN 1
+                END
+            ) AS due_today,
+
+
+            COUNT(
+                CASE
+                    WHEN
+                        (
+                            status NOT IN
+                            ('Resolved', 'Rejected')
+                            OR status IS NULL
+                        )
+                        AND
+                        (
+                            sla_deadline IS NULL
+                            OR sla_deadline >
+                            DATE_ADD(NOW(), INTERVAL 24 HOUR)
+                        )
+                    THEN 1
+                END
+            ) AS within_sla,
+
+
+            COUNT(
+                CASE
+                    WHEN escalated = 1
+                    THEN 1
+                END
+            ) AS escalated,
+
+
+            COUNT(*) AS total
+
+        FROM petitions
+    `;
+
+
+    db.query(
+        query,
+        (err, result) => {
+
+            if (err) {
+
+                console.error(
+                    "SLA stats error:",
+                    err
+                );
+
+                return res.status(500).json({
+                    success: false,
+                    message:
+                        "Failed to load SLA statistics"
+                });
+            }
+
+
+            res.json({
+
+                success: true,
+
+                stats:
+                    result[0] || {
+                        overdue: 0,
+                        due_today: 0,
+                        within_sla: 0,
+                        escalated: 0,
+                        total: 0
+                    }
+            });
+        }
+    );
+});
+
+
+/* =====================================================
+   MUNICIPAL OFFICER ONLY
+   DASHBOARD STATISTICS
+===================================================== */
+
+router.get("/dashboard-stats", (req, res) => {
+
+    if (!isMunicipalOfficer(req)) {
+
+        return res.status(403).json({
+            success: false,
+            message:
+                "Dashboard statistics are available only to municipal officers"
+        });
+    }
+
+
+    const query = `
+        SELECT
+
+            COUNT(*) AS total,
+
+            COUNT(
+                CASE
+                    WHEN status = 'Pending'
+                    THEN 1
+                END
+            ) AS pending,
+
+            COUNT(
+                CASE
+                    WHEN status = 'Under Review'
+                    THEN 1
+                END
+            ) AS under_review,
+
+            COUNT(
+                CASE
+                    WHEN status = 'In Progress'
+                    THEN 1
+                END
+            ) AS in_progress,
+
+            COUNT(
+                CASE
+                    WHEN status = 'Resolved'
+                    THEN 1
+                END
+            ) AS resolved,
+
+            COUNT(
+                CASE
+                    WHEN status = 'Rejected'
+                    THEN 1
+                END
+            ) AS rejected,
+
+            COUNT(
+                CASE
+                    WHEN
+                        (
+                            status NOT IN
+                            ('Resolved', 'Rejected')
+                            OR status IS NULL
+                        )
+                        AND sla_deadline IS NOT NULL
+                        AND NOW() > sla_deadline
+                    THEN 1
+                END
+            ) AS overdue
+
+        FROM petitions
+    `;
+
+
+    db.query(
+        query,
+        (err, result) => {
+
+            if (err) {
+
+                console.error(
+                    "Dashboard stats error:",
+                    err
+                );
+
+                return res.status(500).json({
+                    success: false,
+                    message:
+                        "Failed to load dashboard statistics"
+                });
+            }
+
+
+            res.json({
+
+                success: true,
+
+                stats:
+                    result[0] || {}
+            });
+        }
+    );
+});
+
+
+/* =====================================================
+   DEPARTMENT OFFICER
+   GET ONLY PETITIONS ASSIGNED TO THEIR DEPARTMENT
+===================================================== */
+
+router.get("/assigned-to-me", (req, res) => {
+
+    if (!isDepartmentOfficer(req)) {
+
+        return res.status(403).json({
+            success: false,
+            message:
+                "This endpoint is only for department officers"
+        });
+    }
+
+
+    const department =
+        req.user.department;
+
+
+    if (!department) {
+
+        return res.status(400).json({
+            success: false,
+            message:
+                "Officer department is not configured"
+        });
+    }
+
+
+    const query = `
+        SELECT *
+        FROM petitions
+        WHERE assigned_department = ?
+        ORDER BY created_at DESC
+    `;
+
+
+    db.query(
+        query,
+        [department],
+        (err, results) => {
+
+            if (err) {
+
+                console.error(
+                    "Department petitions error:",
+                    err
+                );
+
+                return res.status(500).json({
+                    success: false,
+                    message:
+                        "Failed to load department petitions"
+                });
+            }
+
+
+            res.json({
+
+                success: true,
+
+                department,
+
+                petitions:
+                    results || []
+            });
+        }
+    );
+});
+
+
+/* =====================================================
+   MUNICIPAL OFFICER
+   GET OFFICERS BY DEPARTMENT
+===================================================== */
+
+router.get(
+    "/officers-by-department",
+    (req, res) => {
+
+        if (!isMunicipalOfficer(req)) {
+
+            return res.status(403).json({
+                success: false,
+                message:
+                    "Only municipal officers can view department officers"
+            });
+        }
+
+
+        const { department } =
+            req.query;
+
+
+        let query;
+
+        let params = [];
+
+
+        if (
+            department &&
+            department.trim() !== ""
+        ) {
+
+            query = `
+                SELECT
+                    id,
+                    full_name,
+                    email,
+                    department,
+                    officer_type,
+                    sub_role
+                FROM officers
+                WHERE department = ?
+                AND officer_type = 'department'
+                AND (
+                    sub_role IS NULL
+                    OR sub_role != 'municipal'
+                )
+                ORDER BY full_name ASC
+            `;
+
+            params = [
+                department.trim()
+            ];
+
+        }
+
+        else {
+
+            query = `
+                SELECT
+                    id,
+                    full_name,
+                    email,
+                    department,
+                    officer_type,
+                    sub_role
+                FROM officers
+                WHERE officer_type = 'department'
+                AND (
+                    sub_role IS NULL
+                    OR sub_role != 'municipal'
+                )
+                ORDER BY
+                    department ASC,
+                    full_name ASC
+            `;
+        }
+
+
+        db.query(
+            query,
+            params,
+            (err, result) => {
+
+                if (err) {
+
+                    console.error(
+                        "Officers by department error:",
+                        err
+                    );
+
+                    return res.status(500).json({
+                        success: false,
+                        message:
+                            "Failed to fetch officers"
+                    });
+                }
+
+
+                res.json({
+
+                    success: true,
+
+                    officers:
+                        result || []
+                });
+            }
+        );
+    }
+);
+
+/* =====================================================
+   GET ALL DEPARTMENTS (Officer access)
+===================================================== */
+
+router.get("/departments", authenticateToken, (req, res) => {
+    const query = `
+        SELECT
+            id,
+            department_name
+        FROM departments
+        ORDER BY department_name ASC
+    `;
+
+    db.query(query, (err, result) => {
+        if (err) {
+            console.error("Officer Load Departments Error:", err);
+            return res.status(500).json({
+                success: false,
+                message: "Unable to load departments"
+            });
+        }
+
+        return res.json({
+            success: true,
+            departments: result || []
+        });
+    });
+});
+
+
+/* =====================================================
+   MUNICIPAL OFFICER ONLY
+   ASSIGN PETITION
+===================================================== */
+
+router.put(
+    "/petition/:id/assign",
+    (req, res) => {
+
+        if (!isMunicipalOfficer(req)) {
+
+            return res.status(403).json({
+                success: false,
+                message:
+                    "Only municipal officers can assign petitions"
+            });
+        }
+
+
+        const { id } =
+            req.params;
+
+
+        const {
+            assigned_department,
+            assigned_officer_id,
+            assigned_officer_name
+        } = req.body;
+
+
+        if (!assigned_department) {
+
+            return res.status(400).json({
+                success: false,
+                message:
+                    "Department is required"
+            });
+        }
+
+
+        /*
+         * Officer selected
+         */
+        if (assigned_officer_id) {
+
+            const officerQuery = `
+                SELECT
+                    id,
+                    full_name,
+                    email,
+                    department,
+                    officer_type,
+                    sub_role
+                FROM officers
+                WHERE id = ?
+            `;
+
+
+            db.query(
+                officerQuery,
+                [assigned_officer_id],
+                (err, rows) => {
+
+                    if (err) {
+
+                        console.error(
+                            "Officer lookup error:",
+                            err
+                        );
+
+                        return res.status(500).json({
+                            success: false,
+                            message:
+                                "Failed to verify officer"
+                        });
+                    }
+
+
+                    if (
+                        !rows ||
+                        rows.length === 0
+                    ) {
+
+                        return res.status(404).json({
+                            success: false,
+                            message:
+                                "Officer not found"
+                        });
+                    }
+
+
+                    const officer =
+                        rows[0];
+
+
+                    if (
+                        officer.officer_type !==
+                        "department" ||
+                        officer.sub_role ===
+                        "municipal" ||
+                        officer.department !==
+                        assigned_department
+                    ) {
+
+                        return res.status(400).json({
+                            success: false,
+                            message:
+                                "Selected officer does not belong to the selected department"
+                        });
+                    }
+
+
+                    const officerName =
+                        officer.full_name;
+
+
+                    const updateQuery = `
+                        UPDATE petitions
+                        SET
+                            assigned_department = ?,
+                            department_id = (SELECT id FROM departments WHERE department_name = ? LIMIT 1),
+                            assigned_to = ?
+                        WHERE id = ?
+                    `;
+
+
+                    db.query(
+                        updateQuery,
+                        [
+                            assigned_department,
+                            assigned_department,
+                            officerName,
+                            id
+                        ],
+                        (
+                            updateErr,
+                            updateResult
+                        ) => {
+
+                            if (updateErr) {
+
+                                console.error(
+                                    "Assign petition error:",
+                                    updateErr
+                                );
+
+                                return res.status(500).json({
+                                    success: false,
+                                    message:
+                                        "Failed to assign petition"
+                                });
+                            }
+
+
+                            if (
+                                updateResult.affectedRows === 0
+                            ) {
+
+                                return res.status(404).json({
+                                    success: false,
+                                    message:
+                                        "Petition not found"
+                                });
+                            }
+
+
+                            // Trigger assignment email notification
+                            db.query(
+                                "SELECT p.id, p.citizen_name, c.email FROM petitions p LEFT JOIN citizens c ON p.citizen_id = c.id WHERE p.id = ?",
+                                [id],
+                                (mErr, mRows) => {
+                                    if (!mErr && mRows && mRows.length > 0 && mRows[0].email) {
+                                        sendPetitionAssignedEmail(
+                                            mRows[0].email,
+                                            mRows[0].citizen_name,
+                                            id,
+                                            assigned_department
+                                        ).catch((e) => console.error("Assignment email error:", e.message));
+                                    }
+                                }
+                            );
+
+                            res.json({
+
+                                success: true,
+
+                                message:
+                                    "Petition assigned successfully",
+
+                                assigned_department,
+
+                                assigned_to:
+                                    officerName
+                            });
+                        }
+                    );
+                }
+            );
+
+            return;
+        }
+
+
+        /*
+         * Department selected
+         * but no officer selected
+         */
+        const updateQuery = `
+            UPDATE petitions
+            SET
+                assigned_department = ?,
+                department_id = (SELECT id FROM departments WHERE department_name = ? LIMIT 1),
+                assigned_to = ?
+            WHERE id = ?
+        `;
+
+
+        db.query(
+            updateQuery,
+            [
+                assigned_department,
+                assigned_department,
+                assigned_officer_name ||
+                    null,
+                id
+            ],
+            (err, result) => {
+
+                if (err) {
+
+                    console.error(
+                        "Department assignment error:",
+                        err
+                    );
+
+                    return res.status(500).json({
+                        success: false,
+                        message:
+                            "Failed to assign department"
+                    });
+                }
+
+
+                if (
+                    result.affectedRows === 0
+                ) {
+
+                    return res.status(404).json({
+                        success: false,
+                        message:
+                            "Petition not found"
+                    });
+                }
+
+
+                // Trigger assignment email notification
+                db.query(
+                    "SELECT p.id, p.citizen_name, c.email FROM petitions p LEFT JOIN citizens c ON p.citizen_id = c.id WHERE p.id = ?",
+                    [id],
+                    (mErr, mRows) => {
+                        if (!mErr && mRows && mRows.length > 0 && mRows[0].email) {
+                            sendPetitionAssignedEmail(
+                                mRows[0].email,
+                                mRows[0].citizen_name,
+                                id,
+                                assigned_department
+                            ).catch((e) => console.error("Assignment email error:", e.message));
+                        }
+                    }
+                );
+
+                res.json({
+
+                    success: true,
+
+                    message:
+                        "Petition assigned successfully",
+
+                    assigned_department,
+
+                    assigned_to:
+                        assigned_officer_name ||
+                        null
+                });
+            }
+        );
+    }
+);
+
+
+/* =====================================================
+   GET ALL PETITIONS
+===================================================== */
+
+router.get("/petitions", (req, res) => {
+
+    if (
+        !req.user ||
+        req.user.role !== "officer"
+    ) {
+
+        return res.status(403).json({
+            success: false,
+            message:
+                "Officer access required"
+        });
+    }
+
+
+    let query;
+
+    let params = [];
+
+
+    /*
+     * MUNICIPAL OFFICER
+     */
+    if (isMunicipalOfficer(req)) {
+
+        query = `
+            SELECT
+                id,
+                citizen_id,
+                citizen_name,
+                phone,
+                city,
+                state,
+                street,
+                area,
+                description,
+                category,
+                priority,
+                sla_deadline,
+                escalated,
+                escalated_at,
+                escalation_reason,
+                assigned_department,
+                assigned_to,
+                is_spam,
+                spam_reason,
+                image_path,
+                status,
+                created_at
+            FROM petitions
+            ORDER BY created_at DESC
+        `;
+    }
+
+
+    /*
+     * DEPARTMENT OFFICER
+     */
+    else if (isDepartmentOfficer(req)) {
+
+        if (!req.user.department) {
+
+            return res.status(400).json({
+                success: false,
+                message:
+                    "Officer department is not configured"
+            });
+        }
+
+
+        query = `
+            SELECT
+                id,
+                citizen_id,
+                citizen_name,
+                phone,
+                city,
+                state,
+                street,
+                area,
+                description,
+                category,
+                priority,
+                sla_deadline,
+                escalated,
+                escalated_at,
+                escalation_reason,
+                assigned_department,
+                assigned_to,
+                is_spam,
+                spam_reason,
+                image_path,
+                status,
+                created_at
+            FROM petitions
+            WHERE assigned_department = ?
+            ORDER BY created_at DESC
+        `;
+
+
+        params = [
+            req.user.department
+        ];
+    }
+
+
+    else {
+
+        return res.status(403).json({
+            success: false,
+            message:
+                "Invalid officer type"
+        });
+    }
+
+
+    db.query(
+        query,
+        params,
+        (err, result) => {
+
+            if (err) {
+
+                console.error(
+                    "Petitions query error:",
+                    err
+                );
+
+                return res.status(500).json({
+                    success: false,
+                    message:
+                        "Failed to fetch petitions"
+                });
+            }
+
+
+            res.json({
+
+                success: true,
+
+                petitions:
+                    result || []
+            });
+        }
+    );
+});
+
+
+/* =====================================================
+   GET SINGLE PETITION
+===================================================== */
+
+router.get(
+    "/petition/:id",
+    (req, res) => {
+
+        const { id } =
+            req.params;
+
+
+        const query = `
+            SELECT
+                id,
+                citizen_id,
+                citizen_name,
+                phone,
+                city,
+                state,
+                street,
+                area,
+                description,
+                category,
+                priority,
+                sla_deadline,
+                escalated,
+                escalated_at,
+                escalation_reason,
+                assigned_to,
+                assigned_department,
+                image_path,
+                status,
+                created_at
+            FROM petitions
+            WHERE id = ?
+        `;
+
+
+        db.query(
+            query,
+            [id],
+            (err, result) => {
+
+                if (err) {
+
+                    console.error(
+                        "Single petition error:",
+                        err
+                    );
+
+                    return res.status(500).json({
+                        success: false,
+                        message:
+                            "Failed to fetch petition"
+                    });
+                }
+
+
+                if (
+                    !result ||
+                    result.length === 0
+                ) {
+
+                    return res.status(404).json({
+                        success: false,
+                        message:
+                            "Petition not found"
+                    });
+                }
+
+
+                const petition =
+                    result[0];
+
+
+                /*
+                 * CITIZEN
+                 */
+                if (
+                    req.user.role ===
+                    "citizen"
+                ) {
+
+                    if (
+                        String(
+                            petition.citizen_id
+                        ) !==
+                        String(
+                            req.user.id
+                        )
+                    ) {
+
+                        return res.status(403).json({
+                            success: false,
+                            message:
+                                "Access denied. You can only view your own petition."
+                        });
+                    }
+
+
+                    return res.json({
+                        success: true,
+                        petition
+                    });
+                }
+
+
+                /*
+                 * DEPARTMENT OFFICER
+                 */
+                if (
+                    isDepartmentOfficer(req)
+                ) {
+
+                    if (
+                        petition.assigned_department !==
+                        req.user.department
+                    ) {
+
+                        return res.status(403).json({
+                            success: false,
+                            message:
+                                "Access denied. This petition is assigned to another department."
+                        });
+                    }
+
+
+                    return res.json({
+                        success: true,
+                        petition
+                    });
+                }
+
+
+                /*
+                 * MUNICIPAL OFFICER
+                 */
+                if (
+                    isMunicipalOfficer(req)
+                ) {
+
+                    return res.json({
+                        success: true,
+                        petition
+                    });
+                }
+
+
+                return res.status(403).json({
+                    success: false,
+                    message:
+                        "Access denied"
+                });
+            }
+        );
+    }
+);
+
+
+/* =====================================================
+   UPDATE PETITION STATUS
+   DEPARTMENT OFFICER ONLY
+===================================================== */
+
+router.put(
+    "/petition/:id/status",
+    (req, res) => {
+
+        if (
+            !isDepartmentOfficer(req)
+        ) {
+
+            return res.status(403).json({
+                success: false,
+                message:
+                    "Only department officers can update petition status"
+            });
+        }
+
+
+        const { id } =
+            req.params;
+
+
+        const { status } =
+            req.body;
+
+
+        const allowedStatuses = [
+
+            "Pending",
+
+            "Under Review",
+
+            "In Progress",
+
+            "Resolved",
+
+            "Rejected"
+        ];
+
+
+        if (
+            !allowedStatuses.includes(status)
+        ) {
+
+            return res.status(400).json({
+                success: false,
+                message:
+                    "Invalid status"
+            });
+        }
+
+
+        const query = `
+            UPDATE petitions
+            SET status = ?
+            WHERE id = ?
+            AND assigned_department = ?
+        `;
+
+
+        db.query(
+            query,
+            [
+                status,
+                id,
+                req.user.department
+            ],
+            (err, result) => {
+
+                if (err) {
+
+                    console.error(
+                        "Status update error:",
+                        err
+                    );
+
+                    return res.status(500).json({
+                        success: false,
+                        message:
+                            "Failed to update petition status"
+                    });
+                }
+
+
+                if (
+                    result.affectedRows === 0
+                ) {
+
+                    return res.status(403).json({
+                        success: false,
+                        message:
+                            "You cannot update a petition assigned to another department"
+                    });
+                }
+
+
+                /*
+                 * EMAIL NOTIFICATION
+                 */
+                db.query(
+                    `
+                    SELECT
+                        p.id,
+                        p.citizen_id,
+                        p.citizen_name,
+                        p.category,
+                        p.street,
+                        p.area,
+                        p.city,
+                        c.email
+                    FROM petitions p
+                    LEFT JOIN citizens c
+                        ON p.citizen_id = c.id
+                    WHERE p.id = ?
+                    `,
+                    [id],
+                    (fErr, fRows) => {
+
+                        if (
+                            !fErr &&
+                            fRows &&
+                            fRows.length > 0 &&
+                            fRows[0].email
+                        ) {
+
+                            const pet =
+                                fRows[0];
+
+
+                            const email =
+                                pet.email;
+
+
+                            const locStr =
+                                `${pet.street ? pet.street + ", " : ""}` +
+                                `${pet.area || ""}, ` +
+                                `${pet.city || "Madurai"}`;
+
+
+                            if (
+                                status ===
+                                "Under Review"
+                            ) {
+
+                                sendPetitionUnderReviewEmail(
+                                    email,
+                                    pet.citizen_name,
+                                    pet.id,
+                                    pet.category,
+                                    locStr
+                                ).catch(
+                                    e =>
+                                        console.error(
+                                            "Under Review email error:",
+                                            e.message
+                                        )
+                                );
+                            }
+
+
+                            else if (
+                                status ===
+                                "In Progress"
+                            ) {
+
+                                sendPetitionInProgressEmail(
+                                    email,
+                                    pet.citizen_name,
+                                    pet.id,
+                                    pet.category,
+                                    locStr
+                                ).catch(
+                                    e =>
+                                        console.error(
+                                            "In Progress email error:",
+                                            e.message
+                                        )
+                                );
+                            }
+
+
+                            else if (
+                                status ===
+                                "Resolved"
+                            ) {
+
+                                sendPetitionResolvedEmail(
+                                    email,
+                                    pet.citizen_name,
+                                    pet.id
+                                ).catch(
+                                    e =>
+                                        console.error(
+                                            "Resolved email error:",
+                                            e.message
+                                        )
+                                );
+                            }
+                        }
+                    }
+                );
+
+
+                res.json({
+
+                    success: true,
+
+                    message:
+                        "Petition status updated successfully",
+
+                    status
+                });
+            }
+        );
+    }
+);
+
+
+/* =====================================================
+   MUNICIPAL OFFICER ONLY
+   ESCALATED PETITIONS
+===================================================== */
+
+router.get(
+    "/petitions-escalated",
+    (req, res) => {
+
+        if (
+            !isMunicipalOfficer(req)
+        ) {
+
+            return res.status(403).json({
+                success: false,
+                message:
+                    "Only municipal officers can view escalated petitions"
+            });
+        }
+
+
+        const query = `
+            SELECT
+                id,
+                citizen_id,
+                citizen_name,
+                phone,
+                city,
+                state,
+                street,
+                area,
+                description,
+                category,
+                priority,
+                sla_deadline,
+                escalated,
+                escalated_at,
+                escalation_reason,
+                image_path,
+                status,
+                created_at
+            FROM petitions
+            WHERE escalated = 1
+            ORDER BY
+                escalated_at DESC,
+                created_at DESC
+        `;
+
+
+        db.query(
+            query,
+            (err, result) => {
+
+                if (err) {
+
+                    console.error(
+                        "Escalated petitions error:",
+                        err
+                    );
+
+                    return res.status(500).json({
+                        success: false,
+                        message:
+                            "Failed to fetch escalated petitions"
+                    });
+                }
+
+
+                res.json({
+
+                    success: true,
+
+                    petitions:
+                        result || []
+                });
+            }
+        );
+    }
+);
+
+
+/* =====================================================
+   MUNICIPAL OFFICER ONLY
+   CATEGORY PRIORITY
+===================================================== */
+
+router.get(
+    "/priority",
+    (req, res) => {
+
+        if (
+            !isMunicipalOfficer(req)
+        ) {
+
+            return res.status(403).json({
+                success: false,
+                message:
+                    "Category priority is available only to municipal officers"
+            });
+        }
+
+
+        const query = `
+            SELECT
+                category,
+                COUNT(*) AS occurrence
+            FROM petitions
+            WHERE category IS NOT NULL
+            GROUP BY category
+            ORDER BY occurrence DESC
+        `;
+
+
+        db.query(
+            query,
+            (err, result) => {
+
+                if (err) {
+
+                    console.error(
+                        "Priority query error:",
+                        err
+                    );
+
+                    return res.status(500).json({
+                        success: false,
+                        message:
+                            "Failed to calculate complaint priority"
+                    });
+                }
+
+
+                res.json({
+
+                    success: true,
+
+                    priorities:
+                        result || []
+                });
+            }
+        );
+    }
+);
+
+
+/* =====================================================
+   MUNICIPAL OFFICER ONLY
+   AREA PRIORITY
+===================================================== */
+
+router.get(
+    "/area-priority",
+    (req, res) => {
+
+        if (
+            !isMunicipalOfficer(req)
+        ) {
+
+            return res.status(403).json({
+                success: false,
+                message:
+                    "Area priority is available only to municipal officers"
+            });
+        }
+
+
+        const query = `
+            SELECT
+                area,
+                COUNT(*) AS occurrence
+            FROM petitions
+            WHERE area IS NOT NULL
+            AND area != ''
+            GROUP BY area
+            ORDER BY occurrence DESC
+        `;
+
+
+        db.query(
+            query,
+            (err, result) => {
+
+                if (err) {
+
+                    console.error(
+                        "Area priority error:",
+                        err
+                    );
+
+                    return res.status(500).json({
+                        success: false,
+                        message:
+                            "Failed to calculate area priority"
+                    });
+                }
+
+
+                res.json({
+
+                    success: true,
+
+                    priorities:
+                        result || []
+                });
+            }
+        );
+    }
+);
+
+
+/* =====================================================
+   MUNICIPAL OFFICER ONLY
+   MONTHLY STATISTICS
+===================================================== */
+
+router.get(
+    "/monthly-stats",
+    (req, res) => {
+
+        if (
+            !isMunicipalOfficer(req)
+        ) {
+
+            return res.status(403).json({
+                success: false,
+                message:
+                    "Monthly statistics are available only to municipal officers"
+            });
+        }
+
+
+        const query = `
+            SELECT
+                YEAR(created_at) AS year,
+                MONTH(created_at) AS month,
+                category,
+                COUNT(*) AS count
+            FROM petitions
+            WHERE category IS NOT NULL
+            AND category != ''
+            GROUP BY
+                YEAR(created_at),
+                MONTH(created_at),
+                category
+            ORDER BY
+                year DESC,
+                month DESC,
+                count DESC
+        `;
+
+
+        db.query(
+            query,
+            (err, results) => {
+
+                if (err) {
+
+                    console.error(
+                        "Monthly statistics error:",
+                        err
+                    );
+
+                    return res.status(500).json({
+                        success: false,
+                        message:
+                            "Failed to load monthly statistics"
+                    });
+                }
+
+
+                res.json({
+
+                    success: true,
+
+                    monthly_stats:
+                        results || []
+                });
+            }
+        );
+    }
+);
+
+
+/* =====================================================
+   MUNICIPAL OFFICER ONLY
+   ADVANCED ANALYTICS
+===================================================== */
+
+router.get(
+    "/analytics",
+    (req, res) => {
+
+        /*
+         * FIXED:
+         * municipal can now be detected using
+         * either officer_type OR sub_role.
+         */
+        if (
+            !isMunicipalOfficer(req)
+        ) {
+
+            return res.status(403).json({
+                success: false,
+                message:
+                    "Analytics are available only to municipal officers"
+            });
+        }
+
+
+        const period =
+            (
+                req.query.period ||
+                "monthly"
+            ).toLowerCase();
+
+
+        const {
+            from,
+            to,
+            department,
+            category,
+            area,
+            status
+        } = req.query;
+
+
+        const whereConditions = [];
+
+        const params = [];
+
+
+        /* -------------------------------------------------
+           DATE FILTER
+        ------------------------------------------------- */
+
+        if (from && to) {
+
+            whereConditions.push(
+                "created_at BETWEEN ? AND ?"
+            );
+
+
+            params.push(
+
+                `${from} 00:00:00`,
+
+                `${to} 23:59:59`
+            );
+        }
+
+
+        /* -------------------------------------------------
+           DEPARTMENT FILTER
+        ------------------------------------------------- */
+
+        if (
+            department &&
+            department.trim() !== ""
+        ) {
+
+            whereConditions.push(
+                "assigned_department = ?"
+            );
+
+
+            params.push(
+                department.trim()
+            );
+        }
+
+
+        /* -------------------------------------------------
+           CATEGORY FILTER
+        ------------------------------------------------- */
+
+        if (
+            category &&
+            category.trim() !== ""
+        ) {
+
+            whereConditions.push(
+                "category = ?"
+            );
+
+
+            params.push(
+                category.trim()
+            );
+        }
+
+
+        /* -------------------------------------------------
+           AREA FILTER
+        ------------------------------------------------- */
+
+        if (
+            area &&
+            area.trim() !== ""
+        ) {
+
+            whereConditions.push(
+                "area = ?"
+            );
+
+
+            params.push(
+                area.trim()
+            );
+        }
+
+
+        /* -------------------------------------------------
+           STATUS FILTER
+        ------------------------------------------------- */
+
+        if (
+            status &&
+            status.trim() !== ""
+        ) {
+
+            whereConditions.push(
+                "status = ?"
+            );
+
+
+            params.push(
+                status.trim()
+            );
+        }
+
+
+        const dateWhere =
+            whereConditions.length > 0
+                ? " WHERE " +
+                  whereConditions.join(
+                      " AND "
+                  )
+                : "";
+
+
+        /* =================================================
+           KPI
+        ================================================= */
+
+        const kpiQuery = `
+
+            SELECT
+
+                COUNT(*) AS total,
+
+
+                SUM(
+                    CASE
+                        WHEN
+                            status = 'Pending'
+                            OR status IS NULL
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS pending,
+
+
+                SUM(
+                    CASE
+                        WHEN
+                            status =
+                            'Under Review'
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS under_review,
+
+
+                SUM(
+                    CASE
+                        WHEN
+                            status =
+                            'In Progress'
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS in_progress,
+
+
+                SUM(
+                    CASE
+                        WHEN
+                            status =
+                            'Resolved'
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS resolved,
+
+
+                SUM(
+                    CASE
+                        WHEN
+                            status =
+                            'Rejected'
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS rejected,
+
+
+                SUM(
+                    CASE
+                        WHEN
+                            (
+                                status NOT IN
+                                (
+                                    'Resolved',
+                                    'Rejected'
+                                )
+                                OR status IS NULL
+                            )
+                            AND
+                            sla_deadline IS NOT NULL
+                            AND
+                            NOW() >
+                            sla_deadline
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS overdue,
+
+
+                SUM(
+                    CASE
+                        WHEN
+                            (
+                                status NOT IN
+                                (
+                                    'Resolved',
+                                    'Rejected'
+                                )
+                                OR status IS NULL
+                            )
+                            AND
+                            sla_deadline IS NOT NULL
+                            AND
+                            sla_deadline
+                            BETWEEN NOW()
+                            AND DATE_ADD(
+                                NOW(),
+                                INTERVAL 24 HOUR
+                            )
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS due_soon,
+
+
+                SUM(
+                    CASE
+                        WHEN
+                            (
+                                status NOT IN
+                                (
+                                    'Resolved',
+                                    'Rejected'
+                                )
+                                OR status IS NULL
+                            )
+                            AND
+                            (
+                                sla_deadline IS NULL
+                                OR
+                                NOW() <=
+                                sla_deadline
+                            )
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS within_sla
+
+
+            FROM petitions
+
+            ${dateWhere}
+
+        `;
+
+
+        db.query(
+            kpiQuery,
+            params,
+            (kpiErr, kpiRes) => {
+
+                if (kpiErr) {
+
+                    console.error(
+                        "Analytics KPI error:",
+                        kpiErr
+                    );
+
+                    return res.status(500).json({
+                        success: false,
+                        message:
+                            "Analytics error"
+                    });
+                }
+
+
+                const kpi =
+                    kpiRes[0] || {};
+
+
+                const total =
+                    Number(kpi.total) || 0;
+
+
+                const resolved =
+                    Number(kpi.resolved) || 0;
+
+
+                const resolutionRate =
+                    total > 0
+                        ? Math.round(
+                            (
+                                resolved /
+                                total
+                            ) * 100
+                        )
+                        : 0;
+
+
+                const overdue =
+                    Number(
+                        kpi.overdue
+                    ) || 0;
+
+
+                const withinSla =
+                    Number(
+                        kpi.within_sla
+                    ) || 0;
+
+
+                const slaComplianceRate =
+                    (
+                        withinSla +
+                        overdue
+                    ) > 0
+                        ? Math.round(
+                            (
+                                withinSla /
+                                (
+                                    withinSla +
+                                    overdue
+                                )
+                            ) * 100
+                        )
+                        : 100;
+
+
+                /* =========================================
+                   TREND
+                ========================================= */
+
+                let trendSql;
+
+
+                if (
+                    period === "weekly"
+                ) {
+
+                    trendSql = `
+
+                        SELECT
+
+                            CONCAT(
+                                'W',
+                                WEEK(
+                                    created_at,
+                                    1
+                                ),
+                                ' ',
+                                YEAR(
+                                    created_at
+                                )
+                            ) AS label,
+
+
+                            COUNT(*) AS total,
+
+
+                            SUM(
+                                CASE
+                                    WHEN
+                                        status =
+                                        'Pending'
+                                        OR
+                                        status IS NULL
+                                    THEN 1
+                                    ELSE 0
+                                END
+                            ) AS new_count,
+
+
+                            SUM(
+                                CASE
+                                    WHEN
+                                        status =
+                                        'Resolved'
+                                    THEN 1
+                                    ELSE 0
+                                END
+                            ) AS resolved_count
+
+
+                        FROM petitions
+
+                        ${dateWhere}
+
+
+                        GROUP BY
+
+                            YEAR(
+                                created_at
+                            ),
+
+                            WEEK(
+                                created_at,
+                                1
+                            )
+
+
+                        ORDER BY
+
+                            YEAR(
+                                created_at
+                            ),
+
+                            WEEK(
+                                created_at,
+                                1
+                            )
+
+                    `;
+
+                }
+
+
+                else if (
+                    period === "yearly"
+                ) {
+
+                    trendSql = `
+
+                        SELECT
+
+                            CAST(
+                                YEAR(
+                                    created_at
+                                )
+                                AS CHAR
+                            ) AS label,
+
+
+                            COUNT(*) AS total,
+
+
+                            SUM(
+                                CASE
+                                    WHEN
+                                        status =
+                                        'Pending'
+                                        OR
+                                        status IS NULL
+                                    THEN 1
+                                    ELSE 0
+                                END
+                            ) AS new_count,
+
+
+                            SUM(
+                                CASE
+                                    WHEN
+                                        status =
+                                        'Resolved'
+                                    THEN 1
+                                    ELSE 0
+                                END
+                            ) AS resolved_count
+
+
+                        FROM petitions
+
+                        ${dateWhere}
+
+
+                        GROUP BY
+                            YEAR(
+                                created_at
+                            )
+
+
+                        ORDER BY
+                            YEAR(
+                                created_at
+                            )
+
+                    `;
+
+                }
+
+
+                else {
+
+                    trendSql = `
+
+                        SELECT
+
+                            DATE_FORMAT(
+                                created_at,
+                                '%b %Y'
+                            ) AS label,
+
+
+                            COUNT(*) AS total,
+
+
+                            SUM(
+                                CASE
+                                    WHEN
+                                        status =
+                                        'Pending'
+                                        OR
+                                        status IS NULL
+                                    THEN 1
+                                    ELSE 0
+                                END
+                            ) AS new_count,
+
+
+                            SUM(
+                                CASE
+                                    WHEN
+                                        status =
+                                        'Resolved'
+                                    THEN 1
+                                    ELSE 0
+                                END
+                            ) AS resolved_count
+
+
+                        FROM petitions
+
+                        ${dateWhere}
+
+
+                        GROUP BY
+
+                            YEAR(
+                                created_at
+                            ),
+
+                            MONTH(
+                                created_at
+                            )
+
+
+                        ORDER BY
+
+                            YEAR(
+                                created_at
+                            ),
+
+                            MONTH(
+                                created_at
+                            )
+
+                    `;
+                }
+
+
+                db.query(
+                    trendSql,
+                    params,
+                    (
+                        trendErr,
+                        trendRes
+                    ) => {
+
+                        const trend =
+                            trendErr
+                                ? []
+                                : (
+                                    trendRes ||
+                                    []
+                                );
+
+
+                        /* =================================
+                           CATEGORY
+                        ================================= */
+
+                        const categorySql = `
+
+                            SELECT
+
+                                category,
+
+                                COUNT(*) AS count
+
+                            FROM petitions
+
+                            ${dateWhere}
+
+                            GROUP BY
+                                category
+
+                            ORDER BY
+                                count DESC
+
+                        `;
+
+
+                        db.query(
+                            categorySql,
+                            params,
+                            (
+                                catErr,
+                                catRes
+                            ) => {
+
+                                const categories =
+                                    (
+                                        catRes ||
+                                        []
+                                    ).map(
+                                        row => ({
+
+                                            category:
+                                                row.category ||
+                                                "General",
+
+                                            count:
+                                                Number(
+                                                    row.count
+                                                ),
+
+                                            percentage:
+                                                total >
+                                                0
+                                                    ? Math.round(
+                                                        (
+                                                            Number(
+                                                                row.count
+                                                            ) /
+                                                            total
+                                                        ) * 100
+                                                    )
+                                                    : 0
+                                        })
+                                    );
+
+
+                                /* =========================
+                                   AREA
+                                ========================= */
+
+                                const areaSql = `
+
+                                    SELECT
+
+                                        area,
+
+                                        COUNT(*) AS count
+
+                                    FROM petitions
+
+                                    ${dateWhere}
+
+                                    GROUP BY
+                                        area
+
+                                    ORDER BY
+                                        count DESC
+
+                                    LIMIT 10
+
+                                `;
+
+
+                                db.query(
+                                    areaSql,
+                                    params,
+                                    (
+                                        areaErr,
+                                        areaRes
+                                    ) => {
+
+                                        const areas =
+                                            (
+                                                areaRes ||
+                                                []
+                                            ).map(
+                                                row => ({
+
+                                                    area:
+                                                        row.area ||
+                                                        "Unspecified",
+
+                                                    count:
+                                                        Number(
+                                                            row.count
+                                                        ),
+
+                                                    percentage:
+                                                        total >
+                                                        0
+                                                            ? Math.round(
+                                                                (
+                                                                    Number(
+                                                                        row.count
+                                                                    ) /
+                                                                    total
+                                                                ) * 100
+                                                            )
+                                                            : 0
+                                                })
+                                            );
+
+
+                                        /* =================
+                                           DEPARTMENT
+                                           WORKLOAD
+                                        ================= */
+
+                                        const deptSql = `
+
+                                            SELECT
+
+                                                assigned_department
+                                                    AS department,
+
+
+                                                COUNT(*)
+                                                    AS assigned,
+
+
+                                                SUM(
+                                                    CASE
+                                                        WHEN
+                                                            status =
+                                                            'Resolved'
+                                                        THEN 1
+                                                        ELSE 0
+                                                    END
+                                                ) AS resolved,
+
+
+                                                SUM(
+                                                    CASE
+                                                        WHEN
+                                                            status =
+                                                            'Pending'
+                                                            OR
+                                                            status IS NULL
+                                                        THEN 1
+                                                        ELSE 0
+                                                    END
+                                                ) AS pending,
+
+
+                                                SUM(
+                                                    CASE
+                                                        WHEN
+                                                            status =
+                                                            'In Progress'
+                                                        THEN 1
+                                                        ELSE 0
+                                                    END
+                                                ) AS in_progress
+
+
+                                            FROM petitions
+
+
+                                            WHERE
+                                                assigned_department
+                                                IS NOT NULL
+
+
+                                            AND
+                                                assigned_department
+                                                != ''
+
+
+                                            GROUP BY
+                                                assigned_department
+
+
+                                            ORDER BY
+                                                assigned DESC
+
+                                        `;
+
+
+                                        db.query(
+                                            deptSql,
+                                            (
+                                                deptErr,
+                                                deptRes
+                                            ) => {
+
+                                                const departmentWorkload =
+                                                    deptRes ||
+                                                    [];
+
+
+                                                /* =================
+                                                   CATEGORY x AREA
+                                                   MATRIX
+                                                ================= */
+
+                                                const matrixSql = `
+
+                                                    SELECT
+
+                                                        area,
+
+                                                        category,
+
+                                                        COUNT(*)
+                                                            AS count
+
+                                                    FROM petitions
+
+                                                    ${dateWhere}
+
+                                                    GROUP BY
+                                                        area,
+                                                        category
+
+                                                    ORDER BY
+                                                        count DESC
+
+                                                    LIMIT 30
+
+                                                `;
+
+
+                                                db.query(
+                                                    matrixSql,
+                                                    params,
+                                                    (
+                                                        matrixErr,
+                                                        matrixRes
+                                                    ) => {
+
+                                                        const matrixMap =
+                                                            {};
+
+
+                                                        (
+                                                            matrixRes ||
+                                                            []
+                                                        ).forEach(
+                                                            row => {
+
+                                                                const area =
+                                                                    row.area ||
+                                                                    "Other Area";
+
+
+                                                                const category =
+                                                                    row.category ||
+                                                                    "General";
+
+
+                                                                if (
+                                                                    !matrixMap[
+                                                                        area
+                                                                    ]
+                                                                ) {
+
+                                                                    matrixMap[
+                                                                        area
+                                                                    ] = {
+
+                                                                        area,
+
+                                                                        total: 0
+                                                                    };
+                                                                }
+
+
+                                                                matrixMap[
+                                                                    area
+                                                                ][
+                                                                    category
+                                                                ] =
+                                                                    (
+                                                                        matrixMap[
+                                                                            area
+                                                                        ][
+                                                                            category
+                                                                        ] ||
+                                                                        0
+                                                                    ) +
+                                                                    Number(
+                                                                        row.count
+                                                                    );
+
+
+                                                                matrixMap[
+                                                                    area
+                                                                ].total +=
+                                                                    Number(
+                                                                        row.count
+                                                                    );
+                                                            }
+                                                        );
+
+
+                                                        const categoryAreaMatrix =
+                                                            Object.values(
+                                                                matrixMap
+                                                            ).slice(
+                                                                0,
+                                                                10
+                                                            );
+
+
+                                                        /* =================
+                                                           INSIGHTS
+                                                        ================= */
+
+                                                        const insights =
+                                                            [];
+
+
+                                                        if (
+                                                            categories.length >
+                                                            0
+                                                        ) {
+
+                                                            insights.push(
+
+                                                                `"${categories[0].category}" is currently the most reported category with ${categories[0].count} grievances.`
+
+                                                            );
+                                                        }
+
+
+                                                        if (
+                                                            areas.length >
+                                                            0
+                                                        ) {
+
+                                                            insights.push(
+
+                                                                `Zonal area "${areas[0].area}" has the highest complaint concentration.`
+
+                                                            );
+                                                        }
+
+
+                                                        if (
+                                                            overdue >
+                                                            0
+                                                        ) {
+
+                                                            insights.push(
+
+                                                                `${overdue} complaints have breached their SLA deadline.`
+
+                                                            );
+
+                                                        }
+
+                                                        else {
+
+                                                            insights.push(
+
+                                                                "SLA Compliance is currently high with zero overdue complaints."
+
+                                                            );
+                                                        }
+
+
+                                                        insights.push(
+
+                                                            `Overall grievance resolution rate stands at ${resolutionRate}%.`
+
+                                                        );
+
+
+                                                        /* =================
+                                                           FINAL RESPONSE
+                                                        ================= */
+
+                                                        res.json({
+
+                                                            success:
+                                                                true,
+
+                                                            period,
+
+
+                                                            kpi: {
+
+                                                                total,
+
+                                                                pending:
+                                                                    Number(
+                                                                        kpi.pending
+                                                                    ) ||
+                                                                    0,
+
+                                                                under_review:
+                                                                    Number(
+                                                                        kpi.under_review
+                                                                    ) ||
+                                                                    0,
+
+                                                                in_progress:
+                                                                    Number(
+                                                                        kpi.in_progress
+                                                                    ) ||
+                                                                    0,
+
+                                                                resolved,
+
+                                                                rejected:
+                                                                    Number(
+                                                                        kpi.rejected
+                                                                    ) ||
+                                                                    0,
+
+                                                                overdue,
+
+                                                                due_soon:
+                                                                    Number(
+                                                                        kpi.due_soon
+                                                                    ) ||
+                                                                    0,
+
+                                                                within_sla:
+                                                                    withinSla,
+
+                                                                resolution_rate:
+                                                                    resolutionRate,
+
+                                                                sla_compliance_rate:
+                                                                    slaComplianceRate
+                                                            },
+
+
+                                                            trend,
+
+
+                                                            categories,
+
+
+                                                            areas,
+
+
+                                                            department_workload:
+                                                                departmentWorkload,
+
+
+                                                            category_area_matrix:
+                                                                categoryAreaMatrix,
+
+
+                                                            insights
+                                                        });
+                                                    }
+                                                );
+                                            }
+                                        );
+                                    }
+                                );
+                            }
+                        );
+                    }
+                );
+            }
+        );
+    }
+);
+
+
+/* =====================================================
+   GET PETITIONS BY CATEGORY
+   MUNICIPAL ONLY
+===================================================== */
+
+router.get(
+    "/petitions/:category",
+    (req, res) => {
+
+        if (
+            !isMunicipalOfficer(req)
+        ) {
+
+            return res.status(403).json({
+                success: false,
+                message:
+                    "Category-wide petitions are available only to municipal officers"
+            });
+        }
+
+
+        const { category } =
+            req.params;
+
+
+        const query = `
+            SELECT *
+            FROM petitions
+            WHERE category = ?
+            ORDER BY id DESC
+        `;
+
+
+        db.query(
+            query,
+            [category],
+            (err, result) => {
+
+                if (err) {
+
+                    console.error(
+                        "Category petitions error:",
+                        err
+                    );
+
+                    return res.status(500).json({
+                        success: false,
+                        message:
+                            "Failed to fetch petitions"
+                    });
+                }
+
+
+                res.json({
+
+                    success: true,
+
+                    category,
+
+                    petitions:
+                        result || []
+                });
+            }
+        );
+    }
+);
+
+
+/* =====================================================
+   GET PETITIONS BY AREA
+   MUNICIPAL ONLY
+===================================================== */
+
+router.get(
+    "/petitions/area/:area",
+    (req, res) => {
+
+        if (
+            !isMunicipalOfficer(req)
+        ) {
+
+            return res.status(403).json({
+                success: false,
+                message:
+                    "Area-wide petitions are available only to municipal officers"
+            });
+        }
+
+
+        const { area } =
+            req.params;
+
+
+        const query = `
+            SELECT *
+            FROM petitions
+            WHERE LOWER(area) = LOWER(?)
+            ORDER BY created_at DESC
+        `;
+
+
+        db.query(
+            query,
+            [area],
+            (err, result) => {
+
+                if (err) {
+
+                    console.error(
+                        "Area petitions error:",
+                        err
+                    );
+
+                    return res.status(500).json({
+                        success: false,
+                        message:
+                            "Failed to fetch petitions"
+                    });
+                }
+
+
+                res.json({
+
+                    success: true,
+
+                    area,
+
+                    petitions:
+                        result || []
+                });
+            }
+        );
+    }
+);
+
+
+/* =====================================================
+   MAP
+   MUNICIPAL ONLY
+===================================================== */
+
+router.get(
+    "/map",
+    (req, res) => {
+
+        if (
+            !isMunicipalOfficer(req)
+        ) {
+
+            return res.status(403).json({
+                success: false,
+                message:
+                    "Municipal map access only"
+            });
+        }
+
+
+        const query = `
+            SELECT
+                id,
+                citizen_name,
+                area,
+                description,
+                category,
+                status,
+                latitude,
+                longitude,
+                created_at
+            FROM petitions
+            WHERE latitude IS NOT NULL
+            AND longitude IS NOT NULL
+            ORDER BY created_at DESC
+        `;
+
+
+        db.query(
+            query,
+            (err, result) => {
+
+                if (err) {
+
+                    console.error(
+                        "Map query error:",
+                        err
+                    );
+
+                    return res.status(500).json({
+                        success: false,
+                        message:
+                            "Failed to fetch map locations"
+                    });
+                }
+
+
+                res.json({
+
+                    success: true,
+
+                    petitions:
+                        result || []
+                });
+            }
+        );
+    }
+);
+
+
+/* =====================================================
+   EXPORT ROUTER
+===================================================== */
+
+module.exports = router;
